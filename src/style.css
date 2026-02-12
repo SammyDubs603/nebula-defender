@@ -99,3 +99,39 @@ canvas {
   justify-content: center;
   gap: 8px;
 }
+
+.upgrade-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(170px, 1fr));
+  gap: 10px;
+  width: min(88vw, 760px);
+}
+
+.upgrade-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  text-align: left;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #8fb4ff80;
+  background: linear-gradient(180deg, #192b54, #101d3d);
+}
+
+.upgrade-card:hover {
+  border-color: #bfd5ff;
+  transform: translateY(-1px);
+}
+
+.upgrade-card__icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: #375a9f;
+}
+
+.upgrade-card small {
+  color: #b7cbff;
+}

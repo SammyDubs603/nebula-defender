@@ -1,4 +1,20 @@
-import type { Boss, Bullet, Enemy, GameState, Particle, Pickup, Player, Star } from '../entities/types';
+import { ENEMY_SPECS } from '../entities/enemyDefs';
+import type {
+  Boss,
+  Bullet,
+  DamageNumber,
+  Enemy,
+  EnemySpec,
+  EnemyType,
+  GameState,
+  Particle,
+  Pickup,
+  Player,
+  RunUpgrades,
+  Star,
+  UpgradeDefinition,
+} from '../entities/types';
+import { UPGRADE_LABELS, UPGRADE_POOL, createUpgradeState } from '../ui/upgrades';
 import { clamp, distance, normalize, randomRange } from '../utils/math';
 import { loadHighScore, saveHighScore, type Settings } from '../utils/storage';
 import { AudioSystem } from './audio';
@@ -16,25 +32,24 @@ const ENEMY_BULLET_SPEED = 280;
 
 export class NebulaDefenderGame {
   private state: GameState = 'menu';
-
   private player: Player = this.createPlayer();
-
+  private runUpgrades: RunUpgrades = createUpgradeState();
   private bullets: Bullet[] = [];
-
   private enemies: Enemy[] = [];
-
   private pickups: Pickup[] = [];
-
   private particles: Particle[] = [];
-
+  private damageNumbers: DamageNumber[] = [];
   private boss: Boss | null = null;
-
   private stars = this.createStars();
 
   private wave = 1;
   private waveKillTarget = 7;
   private waveKills = 0;
   private enemySpawnTimer = 1;
+  private waveBudget = 0;
+  private waveBudgetRemaining = 0;
+  private nextUpgradeOptions: UpgradeDefinition[] = [];
+  private comboPulse = 0;
 
   private score = 0;
   private highScore = loadHighScore();
@@ -46,7 +61,6 @@ export class NebulaDefenderGame {
   private warningTimer = 0;
   private slowmoTimer = 0;
   private pausePressed = false;
-
   private lastTimestamp = 0;
 
   private readonly audio: AudioSystem;
@@ -80,14 +94,18 @@ export class NebulaDefenderGame {
 
   restart(): void {
     this.player = this.createPlayer();
+    this.runUpgrades = createUpgradeState();
     this.bullets = [];
     this.enemies = [];
     this.pickups = [];
     this.particles = [];
+    this.damageNumbers = [];
     this.boss = null;
     this.wave = 1;
     this.waveKillTarget = 7;
     this.waveKills = 0;
+    this.waveBudget = this.computeWaveBudget(this.wave);
+    this.waveBudgetRemaining = this.waveBudget;
     this.enemySpawnTimer = 1;
     this.score = 0;
     this.combo = 1;
@@ -104,45 +122,45 @@ export class NebulaDefenderGame {
 
     this.update(rawDelta, delta);
     this.render();
-
     requestAnimationFrame(this.tick);
   };
 
   private update(rawDelta: number, delta: number): void {
     if (this.input.isPressed('Escape') && !this.pausePressed) {
       this.pausePressed = true;
-      if (this.state === 'playing') {
-        this.setState('paused');
-      } else if (this.state === 'paused') {
-        this.setState('playing');
-      }
+      if (this.state === 'playing') this.setState('paused');
+      else if (this.state === 'paused') this.setState('playing');
     }
-    if (!this.input.isPressed('Escape')) {
-      this.pausePressed = false;
-    }
+    if (!this.input.isPressed('Escape')) this.pausePressed = false;
 
     this.updateParticles(rawDelta);
     this.updateStars(rawDelta);
+    this.updateDamageNumbers(rawDelta);
+
+    if (this.state === 'upgrade') {
+      this.handleUpgradeInput();
+      return;
+    }
 
     if (this.state === 'warning') {
       this.warningTimer -= rawDelta;
       this.slowmoTimer -= rawDelta;
-      if (this.warningTimer <= 0) {
-        this.setState('playing');
-      }
+      if (this.warningTimer <= 0) this.setState('playing');
       return;
     }
 
-    if (this.state !== 'playing') {
-      return;
-    }
+    if (this.state !== 'playing') return;
 
+    this.comboPulse = Math.max(0, this.comboPulse - rawDelta * 3);
     this.slowmoTimer = Math.max(0, this.slowmoTimer - rawDelta);
     this.player.hitFlash = Math.max(0, this.player.hitFlash - rawDelta * 5);
+    this.player.invulnTimer = Math.max(0, this.player.invulnTimer - rawDelta);
+    this.player.dashCooldown = Math.max(0, this.player.dashCooldown - rawDelta);
     this.comboTimer -= rawDelta;
-    if (this.comboTimer <= 0) {
-      this.combo = 1;
-    }
+    if (this.comboTimer <= 0) this.combo = 1;
+
+    const regenRate = 4 * (1 + this.runUpgrades.shieldRegen * 0.15);
+    this.player.shield = Math.min(this.player.maxShield, this.player.shield + regenRate * rawDelta);
 
     this.updatePlayer(delta);
     this.updateBullets(delta);
@@ -156,36 +174,56 @@ export class NebulaDefenderGame {
 
   private updatePlayer(delta: number): void {
     const axis = this.input.movementAxis();
+    const moveSpeedMult = 1 + this.runUpgrades.moveSpeed * 0.12;
 
-    this.player.velocity.x += axis.x * PLAYER_ACCEL * delta;
-    this.player.velocity.y += axis.y * PLAYER_ACCEL * delta;
-
+    this.player.velocity.x += axis.x * PLAYER_ACCEL * moveSpeedMult * delta;
+    this.player.velocity.y += axis.y * PLAYER_ACCEL * moveSpeedMult * delta;
     this.player.velocity.x *= PLAYER_DAMPING;
     this.player.velocity.y *= PLAYER_DAMPING;
 
-    this.player.velocity.x = clamp(this.player.velocity.x, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
-    this.player.velocity.y = clamp(this.player.velocity.y, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+    const maxSpeed = PLAYER_MAX_SPEED * moveSpeedMult;
+    this.player.velocity.x = clamp(this.player.velocity.x, -maxSpeed, maxSpeed);
+    this.player.velocity.y = clamp(this.player.velocity.y, -maxSpeed, maxSpeed);
 
-    this.player.position.x += this.player.velocity.x * delta;
-    this.player.position.y += this.player.velocity.y * delta;
+    if (this.runUpgrades.dash > 0 && this.input.isPressed('ShiftLeft') && this.player.dashCooldown <= 0) {
+      const dir = normalize(axis.x !== 0 || axis.y !== 0 ? axis : { x: 0, y: -1 });
+      this.player.velocity.x += dir.x * 620;
+      this.player.velocity.y += dir.y * 620;
+      this.player.invulnTimer = 0.25;
+      this.player.dashCooldown = 1.6;
+      this.explodeAt(this.player.position.x, this.player.position.y, '#90d9ff', 14);
+    }
 
-    this.player.position.x = clamp(this.player.position.x, this.player.width / 2, WIDTH - this.player.width / 2);
-    this.player.position.y = clamp(this.player.position.y, this.player.height / 2, HEIGHT - this.player.height / 2);
+    this.player.position.x = clamp(this.player.position.x + this.player.velocity.x * delta, this.player.width / 2, WIDTH - this.player.width / 2);
+    this.player.position.y = clamp(this.player.position.y + this.player.velocity.y * delta, this.player.height / 2, HEIGHT - this.player.height / 2);
 
     this.spawnThruster(delta);
 
     this.fireCooldown -= delta;
     if (this.input.isShooting() && this.fireCooldown <= 0) {
-      this.fireCooldown = PLAYER_FIRE_COOLDOWN;
-      this.bullets.push({
-        position: { x: this.player.position.x, y: this.player.position.y - this.player.height / 2 },
-        velocity: { x: 0, y: -PLAYER_BULLET_SPEED },
-        radius: 4,
-        ttl: 2,
-        fromEnemy: false,
-      });
+      const rate = 1 + this.runUpgrades.fireRate * 0.15;
+      this.fireCooldown = PLAYER_FIRE_COOLDOWN / rate;
+      const count = 1 + this.runUpgrades.extraProjectile;
+      for (let i = 0; i < count; i += 1) {
+        const offset = count === 1 ? 0 : ((i / (count - 1)) - 0.5) * 0.34;
+        this.spawnPlayerBullet(offset);
+      }
       this.audio.shoot();
     }
+  }
+
+  private spawnPlayerBullet(angleOffset: number): void {
+    const speed = PLAYER_BULLET_SPEED * (1 + this.runUpgrades.projectileSpeed * 0.25);
+    this.bullets.push({
+      position: { x: this.player.position.x, y: this.player.position.y - this.player.height / 2 },
+      velocity: { x: Math.sin(angleOffset) * speed, y: -Math.cos(angleOffset) * speed },
+      radius: 4,
+      ttl: 2,
+      fromEnemy: false,
+      damage: 1 * (1 + this.runUpgrades.damage * 0.2),
+      pierce: this.runUpgrades.pierce,
+      crit: false,
+    });
   }
 
   private updateBullets(delta: number): void {
@@ -204,39 +242,67 @@ export class NebulaDefenderGame {
     if (this.boss?.alive) return;
 
     this.enemySpawnTimer -= delta;
-    if (this.waveKills < this.waveKillTarget && this.enemySpawnTimer <= 0) {
+    if (this.waveKills < this.waveKillTarget && this.waveBudgetRemaining > 0 && this.enemySpawnTimer <= 0) {
       this.spawnEnemy();
-      this.enemySpawnTimer = Math.max(0.25, 1.1 - this.wave * 0.05);
+      this.enemySpawnTimer = Math.max(0.2, 0.95 - this.wave * 0.03);
     }
 
     for (const enemy of this.enemies) {
-      if (enemy.type === 'charger') {
-        const dir = normalize({ x: this.player.position.x - enemy.position.x, y: this.player.position.y - enemy.position.y });
-        enemy.velocity.x += dir.x * enemy.speed * 0.45 * delta;
-        enemy.velocity.y += dir.y * enemy.speed * 0.45 * delta;
-      } else {
-        enemy.velocity.y = enemy.speed;
-        enemy.velocity.x += Math.sin(enemy.position.y * 0.03) * 9;
+      enemy.age += delta;
+      enemy.aiTimer -= delta;
+      switch (enemy.type) {
+        case 'drifter':
+        case 'tank':
+        case 'splitter':
+          enemy.velocity.y = enemy.speed;
+          break;
+        case 'zigzagger':
+          enemy.velocity.x = Math.sin(enemy.age * 5 + enemy.zigPhase) * 120;
+          enemy.velocity.y = enemy.speed;
+          break;
+        case 'dasher': {
+          if (enemy.aiTimer <= 0) {
+            const dir = normalize({ x: this.player.position.x - enemy.position.x, y: this.player.position.y - enemy.position.y });
+            enemy.velocity.x = dir.x * enemy.speed * 3;
+            enemy.velocity.y = dir.y * enemy.speed * 3;
+            enemy.aiTimer = 1.2;
+            enemy.dashWindow = 0.25;
+          } else if (enemy.dashWindow <= 0) {
+            enemy.velocity.x *= 0.94;
+            enemy.velocity.y = Math.max(enemy.velocity.y, enemy.speed * 0.45);
+          }
+          enemy.dashWindow -= delta;
+          break;
+        }
+        case 'shooter':
+          enemy.velocity.y = enemy.position.y < 150 ? enemy.speed : 10;
+          if (enemy.fireCooldown <= 0) {
+            enemy.fireCooldown = randomRange(1.05, 1.9);
+            const dir = normalize({ x: this.player.position.x - enemy.position.x, y: this.player.position.y - enemy.position.y });
+            this.bullets.push({
+              position: { ...enemy.position },
+              velocity: { x: dir.x * ENEMY_BULLET_SPEED, y: dir.y * ENEMY_BULLET_SPEED },
+              radius: 4,
+              ttl: 3,
+              fromEnemy: true,
+              damage: 12,
+              pierce: 0,
+              crit: false,
+            });
+          }
+          enemy.fireCooldown -= delta;
+          break;
+        case 'splitDrone':
+          enemy.velocity.y = enemy.speed;
+          enemy.velocity.x *= 0.98;
+          break;
       }
 
       enemy.position.x += enemy.velocity.x * delta;
       enemy.position.y += enemy.velocity.y * delta;
-      enemy.fireCooldown -= delta;
-
-      if (enemy.fireCooldown <= 0 && enemy.type === 'drone' && this.wave >= 2) {
-        enemy.fireCooldown = randomRange(1.2, 2.4);
-        const dir = normalize({ x: this.player.position.x - enemy.position.x, y: this.player.position.y - enemy.position.y });
-        this.bullets.push({
-          position: { ...enemy.position },
-          velocity: { x: dir.x * ENEMY_BULLET_SPEED, y: dir.y * ENEMY_BULLET_SPEED },
-          radius: 4,
-          ttl: 3,
-          fromEnemy: true,
-        });
-      }
     }
 
-    this.enemies = this.enemies.filter((enemy) => enemy.position.y < HEIGHT + 50 && enemy.hp > 0);
+    this.enemies = this.enemies.filter((enemy) => enemy.position.y < HEIGHT + 60 && enemy.hp > 0);
   }
 
   private updateBoss(delta: number): void {
@@ -247,10 +313,8 @@ export class NebulaDefenderGame {
 
     const ratio = boss.hp / boss.maxHp;
     boss.phase = ratio <= 0.3 ? 3 : ratio <= 0.7 ? 2 : 1;
-
     boss.velocity.x = Math.sin(boss.patternTimer * 0.9) * (boss.phase === 3 ? 180 : 120);
-    boss.position.x += boss.velocity.x * delta;
-    boss.position.x = clamp(boss.position.x, boss.radius + 20, WIDTH - boss.radius - 20);
+    boss.position.x = clamp(boss.position.x + boss.velocity.x * delta, boss.radius + 20, WIDTH - boss.radius - 20);
 
     if (boss.fireCooldown <= 0) {
       this.fireBossPattern(boss);
@@ -259,21 +323,27 @@ export class NebulaDefenderGame {
 
     if (boss.hp <= 0) {
       boss.alive = false;
-      this.score += 2500 * this.combo;
-      this.combo += 1;
-      this.comboTimer = 3;
+      this.score += Math.floor(2500 * this.combo);
+      this.bumpCombo(1);
       this.audio.explosion();
       this.explodeAt(boss.position.x, boss.position.y, '#ff7f4d', 90);
     }
   }
 
   private updatePickups(delta: number): void {
+    const magnet = this.player.pickupMagnetRadius * (1 + this.runUpgrades.magnet * 0.25);
     for (let i = this.pickups.length - 1; i >= 0; i -= 1) {
       const pickup = this.pickups[i];
-      pickup.position.y += pickup.velocityY * delta;
-      if (pickup.position.y > HEIGHT + 30) {
-        this.pickups.splice(i, 1);
+      const d = distance(pickup.position, this.player.position);
+      if (d < magnet) {
+        const dir = normalize({ x: this.player.position.x - pickup.position.x, y: this.player.position.y - pickup.position.y });
+        pickup.position.x += dir.x * 280 * delta;
+        pickup.position.y += dir.y * 280 * delta;
+      } else {
+        pickup.position.y += pickup.velocityY * delta;
       }
+
+      if (pickup.position.y > HEIGHT + 30) this.pickups.splice(i, 1);
     }
   }
 
@@ -285,21 +355,31 @@ export class NebulaDefenderGame {
         for (let e = this.enemies.length - 1; e >= 0; e -= 1) {
           const enemy = this.enemies[e];
           if (distance(bullet.position, enemy.position) < bullet.radius + enemy.radius) {
-            this.bullets.splice(i, 1);
-            enemy.hp -= 1;
-            this.explodeAt(bullet.position.x, bullet.position.y, '#ffd37b', 8);
-            consumed = true;
-            if (enemy.hp <= 0) {
-              this.enemyKilled(enemy, e);
+            const crit = Math.random() < this.runUpgrades.critChance * 0.1;
+            const damage = bullet.damage * (crit ? 2 : 1);
+            enemy.hp -= damage;
+            this.spawnDamageNumber(enemy.position.x, enemy.position.y - 10, damage, crit);
+            this.explodeAt(bullet.position.x, bullet.position.y, crit ? '#ffe188' : '#ffd37b', crit ? 12 : 7);
+
+            if (bullet.pierce <= 0) {
+              this.bullets.splice(i, 1);
+              consumed = true;
+            } else {
+              bullet.pierce -= 1;
             }
+
+            if (enemy.hp <= 0) this.enemyKilled(enemy, e);
             break;
           }
         }
 
         if (!consumed && this.boss?.alive && distance(bullet.position, this.boss.position) < bullet.radius + this.boss.radius) {
           this.bullets.splice(i, 1);
-          this.boss.hp -= 1;
-          this.score += 6;
+          const crit = Math.random() < this.runUpgrades.critChance * 0.1;
+          const damage = bullet.damage * (crit ? 2 : 1);
+          this.boss.hp -= damage;
+          this.score += Math.floor(6 * (crit ? 2 : 1));
+          this.spawnDamageNumber(bullet.position.x, bullet.position.y, damage, crit);
           this.explodeAt(bullet.position.x, bullet.position.y, '#ffb366', 6);
         }
       } else if (distance(bullet.position, this.player.position) < bullet.radius + 16) {
@@ -317,18 +397,13 @@ export class NebulaDefenderGame {
       }
     }
 
-    if (this.boss?.alive && distance(this.boss.position, this.player.position) < this.boss.radius + 18) {
-      this.damagePlayer(28);
-    }
+    if (this.boss?.alive && distance(this.boss.position, this.player.position) < this.boss.radius + 18) this.damagePlayer(28);
 
     for (let i = this.pickups.length - 1; i >= 0; i -= 1) {
       const pickup = this.pickups[i];
       if (distance(pickup.position, this.player.position) < pickup.radius + 18) {
-        if (pickup.type === 'health') {
-          this.player.hp = clamp(this.player.hp + 25, 0, 100);
-        } else {
-          this.player.shield = clamp(this.player.shield + 30, 0, 100);
-        }
+        if (pickup.type === 'health') this.player.hp = clamp(this.player.hp + 25, 0, this.player.maxHp);
+        else this.player.shield = clamp(this.player.shield + 30, 0, this.player.maxShield);
         this.pickups.splice(i, 1);
         this.audio.pickup();
       }
@@ -338,13 +413,19 @@ export class NebulaDefenderGame {
   private enemyKilled(enemy: Enemy, enemyIndex: number): void {
     this.enemies.splice(enemyIndex, 1);
     this.waveKills += 1;
-    this.combo = Math.min(this.combo + 0.2, 8);
-    this.comboTimer = 2.5;
-    this.score += Math.floor((enemy.type === 'charger' ? 180 : 120) * this.combo);
+    this.bumpCombo(0.2);
+    this.score += Math.floor(enemy.scoreValue * this.combo * (enemy.elite ? 1.25 : 1));
     this.audio.explosion();
-    this.explodeAt(enemy.position.x, enemy.position.y, '#ff9a62', 26);
+    this.explodeAt(enemy.position.x, enemy.position.y, enemy.elite ? '#ffeaa1' : '#ff9a62', enemy.elite ? 36 : 26);
 
-    if (Math.random() < 0.13) {
+    if (enemy.type === 'splitter') {
+      for (let i = 0; i < 2; i += 1) {
+        this.enemies.push(this.createEnemy({ type: 'splitDrone', unlockWave: 1, cost: 0, hp: 1, speed: 170, radius: 9, scoreValue: 70 }, false, enemy.position, i === 0 ? -120 : 120));
+      }
+    }
+
+    const shouldDrop = enemy.elite || Math.random() < 0.13;
+    if (shouldDrop) {
       this.pickups.push({
         position: { ...enemy.position },
         radius: 9,
@@ -354,7 +435,15 @@ export class NebulaDefenderGame {
     }
   }
 
+  private bumpCombo(delta: number): void {
+    const prev = this.combo;
+    this.combo = Math.min(this.combo + delta, 8);
+    this.comboTimer = 2.5;
+    if (this.combo > prev) this.comboPulse = 1;
+  }
+
   private damagePlayer(amount: number): void {
+    if (this.player.invulnTimer > 0) return;
     const absorbed = Math.min(this.player.shield, amount);
     this.player.shield -= absorbed;
     this.player.hp -= amount - absorbed;
@@ -378,13 +467,52 @@ export class NebulaDefenderGame {
     if (this.waveKills >= this.waveKillTarget && this.enemies.length === 0) {
       this.wave += 1;
       this.waveKills = 0;
-      this.waveKillTarget = Math.min(22, this.waveKillTarget + 2);
-      this.enemySpawnTimer = 1;
+      this.waveKillTarget = Math.min(28, this.waveKillTarget + 2);
+      this.waveBudget = this.computeWaveBudget(this.wave);
+      this.waveBudgetRemaining = this.waveBudget;
+      this.enemySpawnTimer = 0.7;
 
-      if (this.wave % 5 === 0) {
-        this.spawnBossWarning();
-      }
+      if (this.wave % 5 === 0) this.spawnBossWarning();
+      else this.enterUpgradeState();
     }
+  }
+
+  private enterUpgradeState(): void {
+    this.state = 'upgrade';
+    this.nextUpgradeOptions = this.rollUpgradeOptions();
+    this.updateOverlay();
+  }
+
+  private rollUpgradeOptions(): UpgradeDefinition[] {
+    const pool = [...UPGRADE_POOL];
+    const picks: UpgradeDefinition[] = [];
+    while (picks.length < 3 && pool.length > 0) {
+      const idx = Math.floor(Math.random() * pool.length);
+      picks.push(pool.splice(idx, 1)[0]);
+    }
+    return picks;
+  }
+
+  chooseUpgrade(slot: number): void {
+    const picked = this.nextUpgradeOptions[slot];
+    if (!picked) return;
+    this.runUpgrades[picked.id] += 1;
+
+    if (picked.id === 'maxHp') {
+      this.player.maxHp += 20;
+      this.player.hp += 20;
+    } else if (picked.id === 'maxShield') {
+      this.player.maxShield += 20;
+      this.player.shield += 20;
+    }
+
+    this.setState('playing');
+  }
+
+  private handleUpgradeInput(): void {
+    if (this.input.isPressed('Digit1')) this.chooseUpgrade(0);
+    else if (this.input.isPressed('Digit2')) this.chooseUpgrade(1);
+    else if (this.input.isPressed('Digit3')) this.chooseUpgrade(2);
   }
 
   private spawnBossWarning(): void {
@@ -408,80 +536,71 @@ export class NebulaDefenderGame {
   private fireBossPattern(boss: Boss): void {
     if (boss.phase === 1) {
       for (let i = -2; i <= 2; i += 1) {
-        this.bullets.push({
-          position: { x: boss.position.x + i * 16, y: boss.position.y + 30 },
-          velocity: { x: i * 35, y: ENEMY_BULLET_SPEED },
-          radius: 5,
-          ttl: 4,
-          fromEnemy: true,
-        });
+        this.bullets.push({ position: { x: boss.position.x + i * 16, y: boss.position.y + 30 }, velocity: { x: i * 35, y: ENEMY_BULLET_SPEED }, radius: 5, ttl: 4, fromEnemy: true, damage: 12, pierce: 0, crit: false });
       }
     } else if (boss.phase === 2) {
       for (let i = 0; i < 12; i += 1) {
         const angle = (Math.PI * 2 * i) / 12;
-        this.bullets.push({
-          position: { ...boss.position },
-          velocity: { x: Math.cos(angle) * 170, y: Math.sin(angle) * 170 + 80 },
-          radius: 4,
-          ttl: 4,
-          fromEnemy: true,
-        });
+        this.bullets.push({ position: { ...boss.position }, velocity: { x: Math.cos(angle) * 170, y: Math.sin(angle) * 170 + 80 }, radius: 4, ttl: 4, fromEnemy: true, damage: 12, pierce: 0, crit: false });
       }
     } else {
       const dir = normalize({ x: this.player.position.x - boss.position.x, y: this.player.position.y - boss.position.y });
       for (let i = -3; i <= 3; i += 1) {
-        const side = { x: dir.x * ENEMY_BULLET_SPEED + i * 30, y: dir.y * ENEMY_BULLET_SPEED + Math.abs(i) * 8 };
-        this.bullets.push({
-          position: { ...boss.position },
-          velocity: side,
-          radius: 5,
-          ttl: 3,
-          fromEnemy: true,
-        });
+        this.bullets.push({ position: { ...boss.position }, velocity: { x: dir.x * ENEMY_BULLET_SPEED + i * 30, y: dir.y * ENEMY_BULLET_SPEED + Math.abs(i) * 8 }, radius: 5, ttl: 3, fromEnemy: true, damage: 14, pierce: 0, crit: false });
       }
     }
   }
 
+  private computeWaveBudget(wave: number): number {
+    return 7 + Math.floor(wave * 1.75);
+  }
+
   private spawnEnemy(): void {
-    const chargerChance = Math.min(0.4, 0.08 + this.wave * 0.03);
-    const type = Math.random() < chargerChance ? 'charger' : 'drone';
-    this.enemies.push({
-      position: { x: randomRange(30, WIDTH - 30), y: -20 },
-      velocity: { x: 0, y: 0 },
-      radius: type === 'charger' ? 15 : 13,
-      hp: type === 'charger' ? 3 + Math.floor(this.wave / 5) : 2 + Math.floor(this.wave / 6),
-      speed: type === 'charger' ? 140 + this.wave * 3 : 70 + this.wave * 4,
-      fireCooldown: randomRange(0.7, 1.7),
-      type,
-    });
+    const unlocked = ENEMY_SPECS.filter((spec) => spec.unlockWave <= this.wave && spec.cost <= this.waveBudgetRemaining);
+    if (unlocked.length === 0) return;
+    const spec = unlocked[Math.floor(Math.random() * unlocked.length)];
+    this.waveBudgetRemaining -= spec.cost;
+    const elite = this.wave >= 4 && Math.random() < Math.min(0.28, 0.03 + this.wave * 0.015);
+    this.enemies.push(this.createEnemy(spec, elite));
+  }
+
+  private createEnemy(spec: EnemySpec, elite: boolean, at?: { x: number; y: number }, impulseX = 0): Enemy {
+    const hp = spec.hp + Math.floor(this.wave * 0.25);
+    const enemy: Enemy = {
+      position: at ? { ...at } : { x: randomRange(40, WIDTH - 40), y: -30 },
+      velocity: { x: impulseX, y: 0 },
+      radius: spec.radius * (elite ? 1.15 : 1),
+      hp: hp * (elite ? 1.5 : 1),
+      maxHp: hp * (elite ? 1.5 : 1),
+      speed: (spec.speed + this.wave * 2.5) * (elite ? 1.2 : 1),
+      fireCooldown: randomRange(0.8, 1.6),
+      type: spec.type,
+      scoreValue: spec.scoreValue,
+      elite,
+      age: 0,
+      aiTimer: randomRange(0.5, 1.2),
+      dashWindow: 0,
+      zigPhase: Math.random() * Math.PI * 2,
+    };
+    return enemy;
+  }
+
+  private spawnDamageNumber(x: number, y: number, value: number, crit: boolean): void {
+    this.damageNumbers.push({ position: { x, y }, velocity: { x: randomRange(-15, 15), y: crit ? -78 : -64 }, value: Math.max(1, Math.round(value)), crit, life: 0.65, maxLife: 0.65 });
   }
 
   private explodeAt(x: number, y: number, color: string, count: number): void {
     for (let i = 0; i < count; i += 1) {
       const a = Math.random() * Math.PI * 2;
       const speed = randomRange(30, 240);
-      this.particles.push({
-        position: { x, y },
-        velocity: { x: Math.cos(a) * speed, y: Math.sin(a) * speed },
-        life: randomRange(0.15, 0.8),
-        maxLife: 0.8,
-        color,
-        size: randomRange(1, 3.4),
-      });
+      this.particles.push({ position: { x, y }, velocity: { x: Math.cos(a) * speed, y: Math.sin(a) * speed }, life: randomRange(0.15, 0.8), maxLife: 0.8, color, size: randomRange(1, 3.4) });
     }
   }
 
   private spawnThruster(delta: number): void {
     if (Math.abs(this.player.velocity.x) + Math.abs(this.player.velocity.y) < 20) return;
     if (Math.random() > delta * 45) return;
-    this.particles.push({
-      position: { x: this.player.position.x, y: this.player.position.y + this.player.height * 0.4 },
-      velocity: { x: randomRange(-16, 16), y: randomRange(90, 170) },
-      life: randomRange(0.1, 0.26),
-      maxLife: 0.26,
-      color: '#5bd1ff',
-      size: randomRange(1, 2.2),
-    });
+    this.particles.push({ position: { x: this.player.position.x, y: this.player.position.y + this.player.height * 0.4 }, velocity: { x: randomRange(-16, 16), y: randomRange(90, 170) }, life: randomRange(0.1, 0.26), maxLife: 0.26, color: '#5bd1ff', size: randomRange(1, 2.2) });
   }
 
   private updateParticles(delta: number): void {
@@ -492,9 +611,17 @@ export class NebulaDefenderGame {
       p.position.y += p.velocity.y * delta;
       p.velocity.x *= 0.97;
       p.velocity.y *= 0.97;
-      if (p.life <= 0) {
-        this.particles.splice(i, 1);
-      }
+      if (p.life <= 0) this.particles.splice(i, 1);
+    }
+  }
+
+  private updateDamageNumbers(delta: number): void {
+    for (let i = this.damageNumbers.length - 1; i >= 0; i -= 1) {
+      const num = this.damageNumbers[i];
+      num.life -= delta;
+      num.position.x += num.velocity.x * delta;
+      num.position.y += num.velocity.y * delta;
+      if (num.life <= 0) this.damageNumbers.splice(i, 1);
     }
   }
 
@@ -524,11 +651,10 @@ export class NebulaDefenderGame {
     this.renderEnemies();
     this.renderBoss();
     this.renderPlayer();
+    this.renderDamageNumbers();
     this.renderHud();
-    if (this.state === 'warning') {
-      this.renderWarningBanner();
-    }
 
+    if (this.state === 'warning') this.renderWarningBanner();
     this.ctx.restore();
   }
 
@@ -544,7 +670,16 @@ export class NebulaDefenderGame {
     const { x, y } = this.player.position;
     this.ctx.save();
     this.ctx.translate(x, y);
-    this.ctx.fillStyle = this.player.hitFlash > 0 ? '#ffffff' : '#8fd3ff';
+
+    if (this.combo >= 3) {
+      this.ctx.strokeStyle = `rgba(123,210,255,${0.35 + Math.sin(performance.now() * 0.01) * 0.12})`;
+      this.ctx.lineWidth = 5;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, 24 + Math.sin(performance.now() * 0.018) * 2, 0, Math.PI * 2);
+      this.ctx.stroke();
+    }
+
+    this.ctx.fillStyle = this.player.invulnTimer > 0 ? '#d9f4ff' : this.player.hitFlash > 0 ? '#ffffff' : '#8fd3ff';
     this.ctx.beginPath();
     this.ctx.moveTo(0, -14);
     this.ctx.lineTo(22, 12);
@@ -568,10 +703,28 @@ export class NebulaDefenderGame {
 
   private renderEnemies(): void {
     for (const enemy of this.enemies) {
-      this.ctx.fillStyle = enemy.type === 'charger' ? '#ff8d7c' : '#ffba7b';
+      this.ctx.fillStyle = this.getEnemyColor(enemy.type);
       this.ctx.beginPath();
       this.ctx.arc(enemy.position.x, enemy.position.y, enemy.radius, 0, Math.PI * 2);
       this.ctx.fill();
+
+      if (enemy.elite) {
+        this.ctx.strokeStyle = '#ffe38e';
+        this.ctx.lineWidth = 2;
+        this.ctx.stroke();
+      }
+    }
+  }
+
+  private getEnemyColor(type: EnemyType): string {
+    switch (type) {
+      case 'drifter': return '#ffba7b';
+      case 'zigzagger': return '#ff8f95';
+      case 'tank': return '#c383ff';
+      case 'dasher': return '#ff6f61';
+      case 'shooter': return '#ffbf5f';
+      case 'splitter': return '#7cd8ff';
+      case 'splitDrone': return '#89f1c0';
     }
   }
 
@@ -610,15 +763,42 @@ export class NebulaDefenderGame {
     }
   }
 
+  private renderDamageNumbers(): void {
+    for (const num of this.damageNumbers) {
+      const alpha = clamp(num.life / num.maxLife, 0, 1);
+      this.ctx.fillStyle = num.crit ? `rgba(255,228,140,${alpha})` : `rgba(235,240,255,${alpha})`;
+      this.ctx.font = `${num.crit ? 'bold 20px' : '16px'} Inter, sans-serif`;
+      this.ctx.fillText(`${num.value}${num.crit ? '!' : ''}`, num.position.x, num.position.y);
+    }
+  }
+
   private renderHud(): void {
     this.ctx.fillStyle = '#e6ecff';
     this.ctx.font = '16px Inter, sans-serif';
     this.ctx.fillText(`Wave ${this.wave}`, 16, 28);
     this.ctx.fillText(`Score ${this.score}`, 16, 50);
     this.ctx.fillText(`High ${this.highScore}`, 16, 72);
-    this.ctx.fillText(`Combo x${this.combo.toFixed(1)}`, 16, 94);
-    this.ctx.fillText(`HP ${Math.max(0, Math.floor(this.player.hp))}`, WIDTH - 140, 28);
-    this.ctx.fillText(`Shield ${Math.max(0, Math.floor(this.player.shield))}`, WIDTH - 140, 50);
+
+    const pulse = 1 + this.comboPulse * 0.15;
+    this.ctx.save();
+    this.ctx.translate(16, 98);
+    this.ctx.scale(pulse, pulse);
+    this.ctx.fillStyle = this.combo >= 3 ? '#9ad9ff' : '#e6ecff';
+    this.ctx.fillText(`Combo x${this.combo.toFixed(1)}`, 0, 0);
+    this.ctx.restore();
+
+    this.ctx.fillStyle = '#e6ecff';
+    this.ctx.fillText(`HP ${Math.max(0, Math.floor(this.player.hp))}/${Math.floor(this.player.maxHp)}`, WIDTH - 195, 28);
+    this.ctx.fillText(`Shield ${Math.max(0, Math.floor(this.player.shield))}/${Math.floor(this.player.maxShield)}`, WIDTH - 195, 50);
+
+    const active = Object.entries(this.runUpgrades).filter(([, count]) => count > 0).slice(0, 6);
+    this.ctx.fillStyle = 'rgba(9,20,45,0.8)';
+    this.ctx.fillRect(WIDTH - 238, 72, 222, 20 + active.length * 18);
+    this.ctx.strokeStyle = '#7aa8ff55';
+    this.ctx.strokeRect(WIDTH - 238, 72, 222, 20 + active.length * 18);
+    this.ctx.fillStyle = '#cde1ff';
+    this.ctx.fillText('Run Build', WIDTH - 225, 90);
+    active.forEach(([key, count], index) => this.ctx.fillText(`${UPGRADE_LABELS[key as keyof RunUpgrades]} x${count}`, WIDTH - 225, 108 + index * 18));
   }
 
   private renderWarningBanner(): void {
@@ -633,11 +813,17 @@ export class NebulaDefenderGame {
 
   private updateOverlay(): void {
     if (this.state === 'menu') {
-      this.overlay.innerHTML = `<h2>Nebula Defender — Phase 2</h2><p>Fight through waves, build combos, survive bosses.</p><button data-action="start">Start Game</button><button data-action="settings">Settings</button>`;
+      this.overlay.innerHTML = `<h2>Nebula Defender — Phase 3</h2><p>Roguelike builds, enemy variants, elite threats.</p><button data-action="start">Start Game</button><button data-action="settings">Settings</button>`;
     } else if (this.state === 'settings') {
       this.overlay.innerHTML = `<h2>Settings</h2><label><input type="checkbox" data-setting="sound" ${this.settings.soundEnabled ? 'checked' : ''}/> Sound</label><label><input type="checkbox" data-setting="shake" ${this.settings.screenshake ? 'checked' : ''}/> Screen shake</label><button data-action="back">Back</button>`;
     } else if (this.state === 'paused') {
       this.overlay.innerHTML = `<h2>Paused</h2><button data-action="resume">Resume</button><button data-action="menu">Main Menu</button>`;
+    } else if (this.state === 'upgrade') {
+      this.overlay.innerHTML = `<h2>CHOOSE AN UPGRADE</h2><p>Press 1 / 2 / 3 or click a card.</p><div class="upgrade-grid">${this.nextUpgradeOptions
+        .map(
+          (upgrade, index) => `<button class="upgrade-card" data-upgrade-index="${index}"><span class="upgrade-card__icon">${upgrade.icon}</span><strong>${index + 1}. ${upgrade.name}</strong><small>${upgrade.description}</small></button>`,
+        )
+        .join('')}</div>`;
     } else if (this.state === 'gameOver') {
       this.overlay.innerHTML = `<h2>Game Over</h2><p>Score: ${this.score}</p><p>High Score: ${this.highScore}</p><button data-action="restart">Restart</button><button data-action="menu">Main Menu</button>`;
     } else {
@@ -652,8 +838,14 @@ export class NebulaDefenderGame {
       width: 42,
       height: 28,
       hp: 100,
+      maxHp: 100,
       shield: 45,
+      maxShield: 100,
+      shieldRegen: 4,
       hitFlash: 0,
+      pickupMagnetRadius: 84,
+      invulnTimer: 0,
+      dashCooldown: 0,
     };
   }
 
@@ -661,13 +853,7 @@ export class NebulaDefenderGame {
     const stars: Star[] = [];
     for (let i = 0; i < 110; i += 1) {
       const layer = i % 3 === 0 ? 3 : i % 2 === 0 ? 2 : 1;
-      stars.push({
-        x: randomRange(0, WIDTH),
-        y: randomRange(0, HEIGHT),
-        size: layer === 3 ? 2 : layer === 2 ? 1.5 : 1,
-        speed: layer * 30,
-        layer,
-      });
+      stars.push({ x: randomRange(0, WIDTH), y: randomRange(0, HEIGHT), size: layer === 3 ? 2 : layer === 2 ? 1.5 : 1, speed: layer * 30, layer });
     }
     return stars;
   }
