@@ -4,11 +4,17 @@ Nebula Defender is a browser arcade shooter built with **Vite**, **TypeScript**,
 
 ## Phase 1 Features
 
-- Vite + TypeScript app scaffold
+- Vite + TypeScript project scaffold
 - Fixed-size 16:9 canvas playfield
-- Main game loop with `requestAnimationFrame`
-- Player ship movement (WASD or Arrow keys)
-- Continuous shooting (Space or mouse/pointer hold)
+- Main game loop powered by `requestAnimationFrame`
+- Player ship movement (`W/A/S/D` or Arrow keys)
+- Continuous shooting (`Space` or pointer hold)
+- Structured game architecture with dedicated input + game state classes
+
+## Project Structure
+
+- `src/main.ts` — game bootstrap, loop, input handling, player + projectile systems
+- `src/style.css` — page/game-shell/canvas styling
 
 ## Run locally
 
@@ -41,4 +47,9 @@ Examples: Vercel (static project), Netlify, Cloudflare Pages, GitHub Pages.
 ## Controls
 
 - **Move**: `W/A/S/D` or Arrow keys
-- **Shoot**: `Space` or hold mouse button on canvas
+- **Shoot**: `Space` or hold mouse / touch on canvas
+
+## Reasonable Defaults Chosen
+
+- The canvas uses a fixed internal resolution (`960 x 540`) with responsive CSS scaling for predictable gameplay.
+- Shooting is intentionally fast (`0.16s` cooldown) to keep the prototype arcade feel responsive.

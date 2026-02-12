@@ -25,7 +25,7 @@ body {
   width: min(960px, 100%);
 }
 
-header {
+.hud {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -33,6 +33,12 @@ header {
   color: #b9c4ff;
   letter-spacing: 0.04em;
   font-size: 0.9rem;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.hud__title {
+  font-weight: 700;
 }
 
 canvas {
@@ -43,4 +49,5 @@ canvas {
   border: 1px solid rgba(137, 163, 255, 0.35);
   border-radius: 12px;
   box-shadow: 0 0 24px rgba(54, 90, 220, 0.25), inset 0 0 28px rgba(64, 97, 233, 0.1);
+  touch-action: none;
 }
