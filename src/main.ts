@@ -14,8 +14,8 @@ if (!app) {
 app.innerHTML = `
   <section class="game-shell" aria-label="Nebula Defender game area">
     <header class="hud">
-      <span class="hud__title">NEBULA DEFENDER — PHASE 2</span>
-      <span class="hud__hint">Move: WASD / Arrows • Shoot: Space / Mouse • Pause: Esc</span>
+      <span class="hud__title">NEBULA DEFENDER — PHASE 3</span>
+      <span class="hud__hint">Move: WASD / Arrows • Shoot: Space / Mouse • Dash: Shift • Pause: Esc</span>
     </header>
     <div class="canvas-wrap">
       <canvas width="${GAME_WIDTH}" height="${GAME_HEIGHT}" aria-label="Nebula Defender playfield"></canvas>
@@ -42,8 +42,11 @@ const game = new NebulaDefenderGame(context, input, overlay, settings);
 overlay.addEventListener('click', (event) => {
   const target = event.target as HTMLElement;
   const action = target.dataset.action;
+  const upgradeIndex = target.dataset.upgradeIndex;
 
-  if (action === 'start') {
+  if (upgradeIndex) {
+    game.chooseUpgrade(Number(upgradeIndex));
+  } else if (action === 'start') {
     game.restart();
   } else if (action === 'settings') {
     game.setState('settings');
