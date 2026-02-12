@@ -41,6 +41,10 @@ body {
   font-weight: 700;
 }
 
+.canvas-wrap {
+  position: relative;
+}
+
 canvas {
   width: 100%;
   max-width: 960px;
@@ -50,4 +54,48 @@ canvas {
   border-radius: 12px;
   box-shadow: 0 0 24px rgba(54, 90, 220, 0.25), inset 0 0 28px rgba(64, 97, 233, 0.1);
   touch-action: none;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  text-align: center;
+  background: rgba(3, 6, 18, 0.72);
+  border-radius: 12px;
+}
+
+.overlay:empty {
+  display: none;
+}
+
+.overlay h2 {
+  margin: 0;
+}
+
+.overlay p {
+  margin: 0;
+  color: #bfd0ff;
+}
+
+.overlay button,
+.overlay label {
+  font: inherit;
+  color: #eaf0ff;
+}
+
+.overlay button {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #7ea8ff7e;
+  background: #2c3f74;
+  cursor: pointer;
+}
+
+.overlay label {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
 }
